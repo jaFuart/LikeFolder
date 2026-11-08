@@ -1,0 +1,9 @@
+<resources>
+    <style name="LikeFolderTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#F4CE63</item>
+        <item name="android:statusBarColor">#0C101A</item>
+        <item name="android:navigationBarColor">#0C101A</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
