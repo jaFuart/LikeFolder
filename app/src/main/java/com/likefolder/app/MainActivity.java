@@ -313,7 +313,7 @@ public final class MainActivity extends Activity {
     }
     private Button button(String title, boolean primary) {
         Button btn = new Button(this);
-        btn.setText(title); btn.setTextAllCaps(false); btn.setTextSize(14);
+        btn.setText(title); btn.setAllCaps(false); btn.setTextSize(14);
         btn.setTextColor(primary ? BACKGROUND : Color.WHITE);
         btn.setBackground(round(primary ? ACCENT : Color.rgb(46, 54, 72), 12));
         btn.setPadding(dp(12), dp(8), dp(12), dp(8));
