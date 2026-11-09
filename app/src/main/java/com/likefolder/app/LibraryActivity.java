@@ -212,6 +212,8 @@ public final class LibraryActivity extends Activity {
                 TextView text = (TextView) super.getView(position, convertView, parent);
                 text.setTextColor(Color.WHITE); text.setTextSize(13); text.setSingleLine(true);
                 text.setEllipsize(TextUtils.TruncateAt.END); text.setPadding(dp(12), 0, dp(8), 0);
+                text.setCompoundDrawablesWithIntrinsicBounds(null, null, getDrawable(R.drawable.ic_expand_more), null);
+                text.setCompoundDrawablePadding(dp(4));
                 return text;
             }
         };

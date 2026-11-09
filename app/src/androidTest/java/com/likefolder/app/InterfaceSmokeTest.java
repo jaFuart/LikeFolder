@@ -42,6 +42,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
@@ -87,7 +88,7 @@ public final class InterfaceSmokeTest {
                 assertEquals(View.GONE, activity.findViewById(R.id.open_authorization).getVisibility());
                 hideKeyboard(activity);
             });
-            capture("01-login-start");
+            capture(scenario, "01-login-start");
             scenario.onActivity(activity -> {
                 activity.showLoginCode("AB12CD34", "https://oauth.yandex.ru/device");
                 assertEquals("Повторно получить код", ((Button) activity.findViewById(R.id.login_retry)).getText().toString());
@@ -97,16 +98,21 @@ public final class InterfaceSmokeTest {
                 assertTrue(activity.findViewById(R.id.login_copy).isShown());
                 hideKeyboard(activity);
             });
-            capture("02-login-code");
+            capture(scenario, "02-login-code");
             scenario.onActivity(activity -> {
                 ClipboardManager clipboard = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
-                activity.findViewById(R.id.login_code).performClick();
-                assertEquals("AB12CD34", clipboard.getPrimaryClip().getItemAt(0).getText().toString());
+                try {
+                    activity.findViewById(R.id.login_code).performClick();
+                    assertEquals("AB12CD34", clipboard.getPrimaryClip().getItemAt(0).getText().toString());
 
-                clipboard.setPrimaryClip(ClipData.newPlainText("test", "reset"));
-                activity.findViewById(R.id.login_copy).performClick();
-                assertEquals("AB12CD34", clipboard.getPrimaryClip().getItemAt(0).getText().toString());
+                    clipboard.setPrimaryClip(ClipData.newPlainText("test", "reset"));
+                    activity.findViewById(R.id.login_copy).performClick();
+                    assertEquals("AB12CD34", clipboard.getPrimaryClip().getItemAt(0).getText().toString());
+                } finally { clipboard.clearPrimaryClip(); }
             });
+            // SystemUI may retain its clipboard preview after clearPrimaryClip(). Let it expire
+            // on this screen so it cannot cover the library screenshots in the next test.
+            SystemClock.sleep(7000);
         }
     }
 
@@ -118,7 +124,7 @@ public final class InterfaceSmokeTest {
                 assertEquals("1004", rows(activity).get(0));
                 hideKeyboard(activity);
             });
-            capture("03-library");
+            capture(scenario, "03-library");
 
             scenario.onActivity(activity -> ((Spinner) activity.findViewById(R.id.library_sort)).setSelection(2));
             await(scenario, activity -> !rows(activity).isEmpty() && "1001".equals(rows(activity).get(0)),
@@ -133,14 +139,14 @@ public final class InterfaceSmokeTest {
                 assertTrue(check.isChecked());
                 assertTrue(activity.findViewById(R.id.library_download_selected).isEnabled());
             });
-            capture("04-library-selected");
+            capture(scenario, "04-library-selected");
 
             scenario.onActivity(activity -> ((Spinner) activity.findViewById(R.id.library_filter)).setSelection(1));
             await(scenario, activity -> new HashSet<>(rows(activity)).equals(new HashSet<>(Arrays.asList("1002", "1005"))),
                     "Downloaded filter should show only the two downloaded tracks");
             scenario.onActivity(activity -> assertTrue("Selection should survive when filtered out",
                     activity.findViewById(R.id.library_download_selected).isEnabled()));
-            capture("05-library-downloaded");
+            capture(scenario, "05-library-downloaded");
 
             scenario.onActivity(activity -> ((Spinner) activity.findViewById(R.id.library_filter)).setSelection(0));
             await(scenario, activity -> rows(activity).size() == 6, "Removing filter should restore all rows");
@@ -153,7 +159,7 @@ public final class InterfaceSmokeTest {
             await(scenario, activity -> new HashSet<>(rows(activity)).equals(new HashSet<>(Arrays.asList("1001", "1004"))),
                     "Artist search should be case-insensitive");
             scenario.onActivity(InterfaceSmokeTest::hideKeyboard);
-            capture("06-library-search");
+            capture(scenario, "06-library-search");
 
             scenario.onActivity(activity -> activity.findViewById(R.id.library_clear_selection).performClick());
             scenario.onActivity(activity -> assertFalse(activity.findViewById(R.id.library_download_selected).isEnabled()));
@@ -236,9 +242,24 @@ public final class InterfaceSmokeTest {
         if (focus != null) focus.clearFocus();
     }
 
-    private void capture(String name) throws Exception {
+    private <A extends Activity> void capture(ActivityScenario<A> scenario, String name) throws Exception {
+        await(scenario, activity -> {
+            View decor = activity.getWindow().getDecorView();
+            return decor.hasWindowFocus() && decor.isShown() && decor.getWidth() > 0 && decor.getHeight() > 0;
+        }, "The screenshot window must be visible and focused");
         instrumentation.waitForIdleSync();
-        instrumentation.getUiAutomation().waitForIdle(150, 5000);
+        CountDownLatch frameCommitted = new CountDownLatch(1);
+        scenario.onActivity(activity -> {
+            View decor = activity.getWindow().getDecorView();
+            assertTrue("Screenshot checks require hardware rendering", decor.isHardwareAccelerated());
+            decor.getViewTreeObserver().registerFrameCommitCallback(frameCommitted::countDown);
+            decor.invalidate();
+        });
+        assertTrue("The updated UI must submit a rendered frame before capture",
+                frameCommitted.await(10, TimeUnit.SECONDS));
+        // Frame commit precedes display presentation. Allow compositor and window transitions to settle.
+        SystemClock.sleep(1000);
+        instrumentation.getUiAutomation().waitForIdle(300, 5000);
         Bitmap screenshot = instrumentation.getUiAutomation().takeScreenshot();
         assertNotNull("Android should provide a screenshot", screenshot);
         File directory = new File(context.getExternalFilesDir(null), "ui-previews");
