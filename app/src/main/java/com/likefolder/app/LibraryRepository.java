@@ -35,11 +35,29 @@ final class LibraryRepository {
         }
     }
 
+    long lastRefreshAt() {
+        synchronized (LOCK) {
+            Database helper = new Database(context);
+            try (Cursor cursor = helper.getReadableDatabase().query("metadata", new String[]{"value"},
+                    "key=?", new String[]{"refreshed_at"}, null, null, null)) {
+                return cursor.moveToFirst() ? cursor.getLong(0) : 0;
+            } finally { helper.close(); }
+        }
+    }
+
     void clear() {
         synchronized (LOCK) {
             ++generation; // An old account's in-flight refresh must not repopulate the cache.
             Database helper = new Database(context);
-            try { helper.getWritableDatabase().delete("tracks", null, null); }
+            try {
+                SQLiteDatabase db = helper.getWritableDatabase();
+                db.beginTransaction();
+                try {
+                    db.delete("tracks", null, null);
+                    db.delete("metadata", null, null);
+                    db.setTransactionSuccessful();
+                } finally { db.endTransaction(); }
+            }
             finally { helper.close(); }
         }
     }
@@ -90,6 +108,9 @@ final class LibraryRepository {
                     db.delete("tracks", null, null);
                     for (LibraryTrack row : refreshed.values()) db.insertOrThrow("tracks", null, values(row));
                     checkActive();
+                    ContentValues freshness = new ContentValues();
+                    freshness.put("key", "refreshed_at"); freshness.put("value", System.currentTimeMillis());
+                    db.replaceOrThrow("metadata", null, freshness);
                     db.setTransactionSuccessful();
                 } finally { db.endTransaction(); }
             } finally { helper.close(); }
@@ -153,6 +174,7 @@ final class LibraryRepository {
         @Override public void onCreate(SQLiteDatabase db) {
             db.execSQL("CREATE TABLE tracks (id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL, artist TEXT NOT NULL, "
                     + "album TEXT NOT NULL, liked_at INTEGER NOT NULL, like_order INTEGER NOT NULL)");
+            db.execSQL("CREATE TABLE metadata (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL)");
         }
         @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
             throw new IllegalStateException("Unsupported library database upgrade");

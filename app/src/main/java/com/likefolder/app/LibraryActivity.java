@@ -192,8 +192,9 @@ public final class LibraryActivity extends Activity {
         downloadButton.setOnClickListener(v -> downloadSelected());
         LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(-1, -2); buttonParams.topMargin = dp(8);
         footer.addView(downloadButton, buttonParams);
+        jobStatus = AppUi.text(this, "", 12, AppUi.MUTED, false); jobStatus.setMaxLines(3);
+        jobStatus.setPadding(0, dp(8), 0, dp(4)); footer.addView(jobStatus);
         jobPanel = new LinearLayout(this); jobPanel.setOrientation(LinearLayout.VERTICAL);
-        jobStatus = AppUi.text(this, "", 12, AppUi.MUTED, false); jobStatus.setMaxLines(2); jobPanel.addView(jobStatus);
         jobProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         jobProgress.setProgressTintList(ColorStateList.valueOf(AppUi.ACCENT));
         jobPanel.addView(jobProgress, new LinearLayout.LayoutParams(-1, dp(5)));
@@ -230,11 +231,12 @@ public final class LibraryActivity extends Activity {
                 if (fetchFromYandex) repository.refresh((loaded, total) -> postLoad(generation, () ->
                         loadStatus.setText("Загружаю медиатеку: " + loaded + " / " + total)));
                 List<LibraryTrack> result = repository.load();
+                boolean needsRefresh = !fetchFromYandex && System.currentTimeMillis() - repository.lastRefreshAt() > 15 * 60 * 1000L;
                 postLoad(generation, () -> {
                     tracks = result; downloaded = store.ids("downloaded"); selected.removeAll(downloaded);
                     Set<String> known = new HashSet<>(); for (LibraryTrack track : tracks) known.add(track.id);
                     selected.retainAll(known); finishLoad(); applyQuery();
-                    if (tracks.isEmpty() && !fetchFromYandex) loadLibrary(true);
+                    if (needsRefresh) loadLibrary(true);
                 });
             } catch (Exception ex) {
                 postLoad(generation, () -> {
@@ -281,7 +283,8 @@ public final class LibraryActivity extends Activity {
         DownloadCoordinator.Snapshot state = DownloadCoordinator.snapshot();
         jobPanel.setVisibility(state.running ? View.VISIBLE : View.GONE);
         downloadButton.setVisibility(state.running ? View.GONE : View.VISIBLE);
-        jobStatus.setText(state.stopping ? "Останавливаю загрузку…" : state.done + " / " + state.total + " · " + state.currentTitle);
+        jobStatus.setText(!state.running ? store.status() : state.stopping ? "Останавливаю загрузку…"
+                : state.done + " / " + state.total + " · " + state.currentTitle);
         jobProgress.setIndeterminate(state.total <= 0);
         jobProgress.setMax(Math.max(1, state.total)); jobProgress.setProgress(state.done);
         stopButton.setEnabled(!state.stopping); stopButton.setAlpha(state.stopping ? .4f : 1f);

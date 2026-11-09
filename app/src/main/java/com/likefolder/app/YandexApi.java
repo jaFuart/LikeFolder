@@ -10,6 +10,7 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 
 
 import java.util.regex.Matcher;
@@ -23,6 +24,7 @@ final class YandexApi {
     static final String CLIENT_ID = "23cabbbdc6cd418abb4b39c32c41195d";
     static final String CLIENT_SECRET = "53bc75238f0c4d08a118e51fe9203300";
     private static final String CDN_SALT = "XGRlBW9FXlekgbPrRHuSiA";
+    private static final ReentrantLock REFRESH_LOCK = new ReentrantLock();
     private final Store store;
     YandexApi(Store store) { this.store = store; }
 
@@ -37,27 +39,41 @@ final class YandexApi {
                 "grant_type", "device_code", "code", code,
                 "client_id", CLIENT_ID, "client_secret", CLIENT_SECRET), null);
     }
-    private boolean refresh() {
-        synchronized (store) {
-            String rt = store.getRefresh();
-            if (rt.isEmpty()) return false;
-            try {
-                JSONObject r = Net.json(OAUTH + "token", "POST", Net.form(
+    private String refresh(Store.AuthSnapshot expected) {
+        boolean locked = false;
+        try {
+            // Serialize refreshes without holding the auth lock during network I/O or blocking logout.
+            REFRESH_LOCK.lockInterruptibly(); locked = true;
+            DownloadCoordinator.check();
+            Store.AuthSnapshot current = store.authSnapshot();
+            if (current.generation != expected.generation || current.access.isEmpty()) return null;
+            // Another request may already have refreshed this same session while we waited.
+            if (!current.access.equals(expected.access)) return current.access;
+            String rt = store.getRefreshForAccess(expected);
+            if (rt.isEmpty()) return null;
+            JSONObject r = Net.json(OAUTH + "token", "POST", Net.form(
                     "grant_type", "refresh_token", "refresh_token", rt,
                     "client_id", CLIENT_ID, "client_secret", CLIENT_SECRET), null);
-                store.saveTokens(r.getString("access_token"), r.optString("refresh_token", rt));
-                return true;
-            } catch (Exception ex) { return false; }
-        }
+            String access = r.getString("access_token"), refresh = r.optString("refresh_token", rt);
+            boolean[] saved = {false};
+            DownloadCoordinator.commit(() -> saved[0] = store.saveRefreshedTokens(expected, access, refresh));
+            return saved[0] ? access : null;
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt(); return null;
+        } catch (Exception ex) { return null; }
+        finally { if (locked) REFRESH_LOCK.unlock(); }
     }
     private JSONObject request(String path, String body) throws IOException {
-        String token = store.getAccess();
+        Store.AuthSnapshot auth = store.authSnapshot();
+        String token = auth.access;
         if (token.trim().isEmpty()) throw new IOException("Нет авторизации, подключите аккаунт");
         try {
             return Net.json(API + path, body == null ? "GET" : "POST", body, token);
         } catch (Net.ApiError ex) {
-            if (ex.status != 401 || !refresh()) throw ex;
-            return Net.json(API + path, body == null ? "GET" : "POST", body, store.getAccess());
+            if (ex.status != 401) throw ex;
+            String refreshed = refresh(auth);
+            if (refreshed == null) throw ex;
+            return Net.json(API + path, body == null ? "GET" : "POST", body, refreshed);
         }
     }
     long uid() throws IOException {

@@ -7,9 +7,11 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.database.sqlite.SQLiteDatabase;
 import android.graphics.Bitmap;
 import android.graphics.drawable.AdaptiveIconDrawable;
 import android.os.Build;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.view.View;
 import android.view.ViewGroup;
@@ -32,8 +34,10 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -119,11 +123,10 @@ public final class InterfaceSmokeTest {
             scenario.onActivity(activity -> ((Spinner) activity.findViewById(R.id.library_sort)).setSelection(2));
             await(scenario, activity -> !rows(activity).isEmpty() && "1001".equals(rows(activity).get(0)),
                     "Sorting by title should put Вечерний свет first");
-            await(scenario, activity -> ((ListView) activity.findViewById(R.id.library_list)).getChildCount() > 0,
-                    "Track rows should be laid out");
+            await(scenario, activity -> firstTrackCheckBox(activity, "Вечерний свет") != null,
+                    "The first visible row should be laid out with the sorted track");
             scenario.onActivity(activity -> {
-                ListView list = activity.findViewById(R.id.library_list);
-                CheckBox check = findCheckBox(list.getChildAt(0));
+                CheckBox check = firstTrackCheckBox(activity, "Вечерний свет");
                 assertNotNull("Each unsaved track has a selection checkbox", check);
                 assertFalse(check.isChecked());
                 check.performClick();
@@ -142,8 +145,7 @@ public final class InterfaceSmokeTest {
             scenario.onActivity(activity -> ((Spinner) activity.findViewById(R.id.library_filter)).setSelection(0));
             await(scenario, activity -> rows(activity).size() == 6, "Removing filter should restore all rows");
             await(scenario, activity -> {
-                ListView list = activity.findViewById(R.id.library_list);
-                CheckBox check = list.getChildCount() == 0 ? null : findCheckBox(list.getChildAt(0));
+                CheckBox check = firstTrackCheckBox(activity, "Вечерний свет");
                 return check != null && check.isChecked();
             }, "Previously selected track must remain checked");
 
@@ -168,6 +170,7 @@ public final class InterfaceSmokeTest {
     private void seedLibrary() {
         Store store = new Store(context);
         store.saveTokens("synthetic-instrumentation-token-not-valid", "");
+        store.status("Медиатека готова к выбору треков");
         store.likedCount(6);
         store.setIds("downloaded", new HashSet<>(Arrays.asList("1002", "1005")));
         new LibraryRepository(context).remember(Arrays.asList(
@@ -177,6 +180,11 @@ public final class InterfaceSmokeTest {
                 new YandexApi.Track("1001", "Вечерний свет", "Лунный берег", "Город"),
                 new YandexApi.Track("1005", "Тёплый дождь", "Марина", "Лето"),
                 new YandexApi.Track("1003", "На заре", "Север", "Дом")));
+        // This synthetic fixture represents a complete snapshot and must never trigger API refresh.
+        try (SQLiteDatabase db = context.openOrCreateDatabase("library.db", Context.MODE_PRIVATE, null)) {
+            db.execSQL("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                    new Object[]{"refreshed_at", System.currentTimeMillis()});
+        }
     }
 
     private static List<String> rows(Activity activity) {
@@ -187,6 +195,14 @@ public final class InterfaceSmokeTest {
             for (int i = 0; i < adapter.getCount(); i++) ids.add(((LibraryTrack) adapter.getItem(i)).id);
         }
         return ids;
+    }
+
+    private static CheckBox firstTrackCheckBox(Activity activity, String title) {
+        ListView list = activity.findViewById(R.id.library_list);
+        if (list.getFirstVisiblePosition() != 0 || list.getChildCount() == 0) return null;
+        CheckBox check = findCheckBox(list.getChildAt(0));
+        if (check == null || check.getContentDescription() == null) return null;
+        return check.getContentDescription().toString().contains(title) ? check : null;
     }
 
     private static CheckBox findCheckBox(View view) {
@@ -227,8 +243,31 @@ public final class InterfaceSmokeTest {
         assertNotNull("Android should provide a screenshot", screenshot);
         File directory = new File(context.getExternalFilesDir(null), "ui-previews");
         assertTrue(directory.isDirectory() || directory.mkdirs());
-        try (FileOutputStream output = new FileOutputStream(new File(directory, name + ".png"))) {
+        File screenshotFile = new File(directory, name + ".png");
+        try (FileOutputStream output = new FileOutputStream(screenshotFile)) {
             assertTrue(screenshot.compress(Bitmap.CompressFormat.PNG, 100, output));
         } finally { screenshot.recycle(); }
+
+        // connectedDebugAndroidTest can uninstall the app, removing its external files.
+        // Shell-owned copies in Downloads survive that cleanup; all paths here are test constants.
+        String exportDirectory = "/sdcard/Download/LikeFolder-ui-previews";
+        String exportFile = exportDirectory + "/" + name + ".png";
+        shellOutput("mkdir -p " + exportDirectory);
+        shellOutput("cp " + screenshotFile.getAbsolutePath() + " " + exportFile);
+        assertEquals("The exported screenshot must survive app uninstall",
+                Long.toString(screenshotFile.length()), shellOutput("stat -c %s " + exportFile).trim());
+    }
+
+    private String shellOutput(String command) throws Exception {
+        ParcelFileDescriptor descriptor = instrumentation.getUiAutomation().executeShellCommand(command);
+        try (ParcelFileDescriptor.AutoCloseInputStream input =
+                     new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[1024];
+            int count;
+            // Reading to EOF waits for each command to finish before the test can be torn down.
+            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            return new String(output.toByteArray(), StandardCharsets.UTF_8);
+        }
     }
 }
