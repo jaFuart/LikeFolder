@@ -13,9 +13,11 @@ import java.util.Scanner;
 
 /** Small networking helper; credentials are ONLY sent to the API host. */
 final class Net {
-    static final class ApiError extends IOException {
-        final int status;
-        ApiError(int status, String message) { super(message); this.status = status; }
+    private static final ApiRequestQueue MUSIC_REQUESTS = new ApiRequestQueue();
+    interface ConnectionFactory { HttpURLConnection open(URL url) throws IOException; }
+    static final class ApiError extends ApiRequestQueue.HttpError {
+        ApiError(int status, String message) { this(status, message, 0); }
+        ApiError(int status, String message, long retryAfterMillis) { super(status, message, retryAfterMillis); }
     }
     static String form(String... fields) {
         if (fields.length % 2 != 0) throw new IllegalArgumentException("Expected pairs");
@@ -25,9 +27,23 @@ final class Net {
         return encoded == null ? "" : encoded;
     }
     static JSONObject json(String url, String method, String body, String oauth) throws IOException {
+        return json(url, method, body, oauth, MUSIC_REQUESTS,
+                parsed -> (HttpURLConnection) parsed.openConnection());
+    }
+    static JSONObject json(String url, String method, String body, String oauth,
+                           ApiRequestQueue queue, ConnectionFactory connections) throws IOException {
         DownloadCoordinator.check();
-        if (!url.startsWith("https://")) throw new IOException("HTTPS обязателен");
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        URL parsed = new URL(url);
+        if (!parsed.getProtocol().equals("https")) throw new IOException("HTTPS обязателен");
+        if (parsed.getHost().equalsIgnoreCase("api.music.yandex.net"))
+            return queue.execute(() -> jsonOnce(parsed, method, body, oauth, connections));
+        // Device-code polling already has its own timing/retry rules. Do not alter OAuth here.
+        return jsonOnce(parsed, method, body, oauth, connections);
+    }
+    private static JSONObject jsonOnce(URL url, String method, String body, String oauth,
+                                       ConnectionFactory connections) throws IOException {
+        DownloadCoordinator.check();
+        HttpURLConnection conn = connections.open(url);
         try {
             DownloadCoordinator.register(conn);
             conn.setConnectTimeout(15000);
@@ -37,7 +53,7 @@ final class Net {
             conn.setRequestProperty("Accept-Language", "ru");
             conn.setRequestProperty("User-Agent", "LikeFolder/0.1 (Android)");
             if (oauth != null && !oauth.trim().isEmpty()) {
-                if (!new URL(url).getHost().equals("api.music.yandex.net"))
+                if (!url.getHost().equalsIgnoreCase("api.music.yandex.net"))
                     throw new IOException("Заблокирована передача токена на посторонний сервер");
                 conn.setRequestProperty("Authorization", "OAuth " + oauth);
             }
@@ -53,7 +69,8 @@ final class Net {
             DownloadCoordinator.check();
             if (code >= 400) {
                 String detail = result.length() > 250 ? result.substring(0, 250) : result;
-                throw new ApiError(code, "HTTP " + code + " (" + detail + ")");
+                long retryAfter = ApiRequestQueue.retryAfterMillis(conn.getHeaderField("Retry-After"), System.currentTimeMillis());
+                throw new ApiError(code, "HTTP " + code + " (" + detail + ")", retryAfter);
             }
             try { return new JSONObject(result); }
             catch (Exception e) { throw new IOException("Некорректный JSON от сервера", e); }
