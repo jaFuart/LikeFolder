@@ -24,6 +24,7 @@ final class Mp3Writer {
     Mp3Writer(Context context, Store store) { resolver = context.getContentResolver(); this.store = store; }
 
     void save(YandexApi.Track track, String mp3Url) throws IOException {
+        DownloadCoordinator.check();
         String folder = store.folder();
         if (!folder.matches("[\\p{L}\\p{N} _.-]{1,60}") || folder.equals(".") || folder.equals(".."))
             throw new IOException("Неверное имя папки");
@@ -35,6 +36,7 @@ final class Mp3Writer {
 
         HttpURLConnection conn = Net.connectStream(mp3Url);
         Uri target = null;
+        boolean saved = false;
         try (BufferedInputStream in = new BufferedInputStream(conn.getInputStream())) {
             in.mark(16);
             int a = in.read(), b = in.read(), c = in.read();
@@ -51,6 +53,7 @@ final class Mp3Writer {
             values.put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg");
             values.put(MediaStore.Audio.Media.RELATIVE_PATH, directory);
             values.put(MediaStore.Audio.Media.IS_PENDING, 1);
+            DownloadCoordinator.check();
             target = resolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values);
             if (target == null) throw new IOException("Android не разрешил создать аудиофайл");
             long size = 0;
@@ -61,22 +64,34 @@ final class Mp3Writer {
                 byte[] buffer = new byte[65536];
                 int n;
                 while ((n = in.read(buffer)) != -1) {
-                    if (Thread.currentThread().isInterrupted()) throw new IOException("Сохранение прервано");
+                    DownloadCoordinator.check();
                     out.write(buffer, 0, n);
                     size += n;
                 }
             }
             if (size < 2048) throw new IOException("Сервер вернул подозрительно маленький MP3");
+            DownloadCoordinator.check();
             ContentValues finished = new ContentValues();
             finished.put(MediaStore.Audio.Media.IS_PENDING, 0);
-            if (resolver.update(target, finished, null, null) < 1)
-                throw new IOException("Файл записан, но не опубликован в медиатеке");
+            Uri completed = target;
+            DownloadCoordinator.commit(() -> {
+                if (resolver.update(completed, finished, null, null) < 1)
+                    throw new IOException("Файл записан, но не опубликован в медиатеке");
+                store.markDownloaded(track.id);
+            });
             target = null;
+            saved = true;
         } catch (Exception ex) {
-            if (target != null) resolver.delete(target, null, null);
+            // A close error after publishing must not turn a completed, recorded MP3 into a failure.
+            if (saved) return;
+            if (target != null) {
+                try { resolver.delete(target, null, null); }
+                catch (RuntimeException cleanup) { ex.addSuppressed(cleanup); }
+            }
+            DownloadCoordinator.check();
             if (ex instanceof IOException) throw (IOException) ex;
             throw new IOException("Ошибка записи MP3", ex);
-        } finally { conn.disconnect(); }
+        } finally { Net.disconnect(conn); }
     }
     private boolean exists(String folder, String name) {
         String selection = MediaStore.Audio.Media.DISPLAY_NAME + "=? AND " + MediaStore.Audio.Media.RELATIVE_PATH + "=?";

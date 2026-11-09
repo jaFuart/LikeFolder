@@ -17,8 +17,12 @@ import javax.crypto.spec.GCMParameterSpec;
 /** Private settings and Android Keystore-protected OAuth credentials. */
 final class Store {
     private static final String KEY_ALIAS = "likefolder.oauth.v1";
+    private final Context context;
     final SharedPreferences prefs;
-    Store(Context ctx) { prefs = ctx.getApplicationContext().getSharedPreferences("likefolder", Context.MODE_PRIVATE); }
+    Store(Context ctx) {
+        context = ctx.getApplicationContext();
+        prefs = context.getSharedPreferences("likefolder", Context.MODE_PRIVATE);
+    }
 
     synchronized String getAccess() { return decrypt(prefs.getString("access", "")); }
     synchronized String getRefresh() { return decrypt(prefs.getString("refresh", "")); }
@@ -29,7 +33,13 @@ final class Store {
     }
     synchronized boolean isLoggedIn() { return !getAccess().trim().isEmpty(); }
     synchronized void signOut() {
+        new LibraryRepository(context).clear();
         prefs.edit().clear().apply();
+    }
+    synchronized void markDownloaded(String id) {
+        Set<String> downloaded = ids("downloaded"), seen = ids("seen");
+        downloaded.add(id); seen.add(id);
+        prefs.edit().putStringSet("downloaded", downloaded).putStringSet("seen", seen).apply();
     }
     synchronized Set<String> ids(String key) { return new HashSet<>(prefs.getStringSet(key, new HashSet<>())); }
     synchronized void addId(String key, String value) {

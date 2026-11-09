@@ -4,6 +4,9 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.IOException;
 import java.security.MessageDigest;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -62,16 +65,31 @@ final class YandexApi {
         catch (org.json.JSONException ex) { throw new IOException("Нет идентификатора пользователя", ex); }
     }
     List<String> likes() throws IOException {
+        List<String> ids = new ArrayList<>();
+        for (Like like : likedEntries()) ids.add(like.id);
+        return ids;
+    }
+    List<Like> likedEntries() throws IOException {
         try {
             JSONArray all = request("users/" + uid() + "/likes/tracks", null)
                     .getJSONObject("result").getJSONObject("library").getJSONArray("tracks");
-            ArrayList<String> ids = new ArrayList<>();
+            List<Like> likes = new ArrayList<>();
             for (int i = 0; i < all.length(); i++) {
-                String id = all.getJSONObject(i).getString("id");
-                if (id.matches("[0-9]+(:[0-9]+)?")) ids.add(id);
+                JSONObject entry = all.getJSONObject(i);
+                String id = entry.getString("id");
+                if (id.matches("[0-9]+(:[0-9]+)?"))
+                    likes.add(new Like(id, parseLikeTimestamp(entry.optString("timestamp", "")), i));
             }
-            return ids;
+            return likes;
         } catch (org.json.JSONException ex) { throw new IOException("Не удалось прочитать плейлист Мне нравится", ex); }
+    }
+    static long parseLikeTimestamp(String value) {
+        if (value == null || value.trim().isEmpty()) return 0;
+        try { return Math.max(0, Instant.parse(value).toEpochMilli()); }
+        catch (DateTimeParseException ex) {
+            try { return Math.max(0, OffsetDateTime.parse(value).toInstant().toEpochMilli()); }
+            catch (DateTimeParseException ignored) { return 0; }
+        }
     }
     List<Track> tracks(List<String> ids) throws IOException {
         if (ids.isEmpty()) return new ArrayList<>();
@@ -115,7 +133,7 @@ final class YandexApi {
             java.net.HttpURLConnection conn = Net.connectStream(infoUrl);
             String xml;
             try { xml = Net.readText(conn.getInputStream()); }
-            finally { conn.disconnect(); }
+            finally { Net.disconnect(conn); }
             return mp3UrlFromXml(xml);
         } catch (org.json.JSONException ex) { throw new IOException("Не удалось получить ссылку на MP3", ex); }
     }
@@ -146,6 +164,14 @@ final class YandexApi {
             for (byte b : digest) hex.append(String.format(java.util.Locale.ROOT, "%02x", b & 0xff));
             return hex.toString();
         } catch (Exception ex) { throw new IOException("MD5 недоступен", ex); }
+    }
+    static final class Like {
+        final String id;
+        final long timestampMillis;
+        final int order;
+        Like(String id, long timestampMillis, int order) {
+            this.id = id; this.timestampMillis = timestampMillis; this.order = order;
+        }
     }
     static final class Track {
         final String id, title, artist, album;

@@ -1,0 +1,234 @@
+package com.likefolder.app;
+
+import android.Manifest;
+import android.app.Activity;
+import android.app.Instrumentation;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.drawable.AdaptiveIconDrawable;
+import android.os.Build;
+import android.os.SystemClock;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.EditText;
+import android.widget.ListAdapter;
+import android.widget.ListView;
+import android.widget.Spinner;
+import android.widget.TextView;
+
+import androidx.test.core.app.ActivityScenario;
+import androidx.test.ext.junit.runners.AndroidJUnit4;
+import androidx.test.platform.app.InstrumentationRegistry;
+import androidx.work.WorkManager;
+
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
+
+import static org.junit.Assert.*;
+
+/** Real Android view checks using synthetic local data; never starts an API request. */
+@RunWith(AndroidJUnit4.class)
+public final class InterfaceSmokeTest {
+    private Context context;
+    private Instrumentation instrumentation;
+
+    @Before public void prepareLocalState() throws Exception {
+        instrumentation = InstrumentationRegistry.getInstrumentation();
+        context = instrumentation.getTargetContext();
+        WorkManager.getInstance(context).cancelAllWork().getResult().get(5, TimeUnit.SECONDS);
+        new Store(context).signOut();
+        new LibraryRepository(context).clear();
+        if (Build.VERSION.SDK_INT >= 33) {
+            instrumentation.getUiAutomation().grantRuntimePermission(
+                    context.getPackageName(), Manifest.permission.POST_NOTIFICATIONS);
+        }
+    }
+
+    @After public void clearSyntheticAccount() throws Exception {
+        WorkManager.getInstance(context).cancelAllWork().getResult().get(5, TimeUnit.SECONDS);
+        new Store(context).signOut();
+        new LibraryRepository(context).clear();
+    }
+
+    @Test public void launcherEntryHasAdaptiveIcon() throws Exception {
+        Intent launch = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+        assertNotNull("The installed app must have a launcher entry", launch);
+        assertEquals(MainActivity.class.getName(), launch.getComponent().getClassName());
+        assertTrue(context.getPackageManager().getApplicationIcon(context.getPackageName())
+                instanceof AdaptiveIconDrawable);
+    }
+
+    @Test public void receivedCodeCanBeCopiedFromCodeAndIcon() throws Exception {
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                assertEquals("Получить код входа", ((Button) activity.findViewById(R.id.login_retry)).getText().toString());
+                assertEquals(View.GONE, activity.findViewById(R.id.open_authorization).getVisibility());
+                hideKeyboard(activity);
+            });
+            capture("01-login-start");
+            scenario.onActivity(activity -> {
+                activity.showLoginCode("AB12CD34", "https://oauth.yandex.ru/device");
+                assertEquals("Повторно получить код", ((Button) activity.findViewById(R.id.login_retry)).getText().toString());
+                assertTrue(activity.findViewById(R.id.login_retry).isEnabled());
+                assertEquals("AB12CD34", ((TextView) activity.findViewById(R.id.login_code)).getText().toString());
+                assertEquals(View.VISIBLE, activity.findViewById(R.id.open_authorization).getVisibility());
+                assertTrue(activity.findViewById(R.id.login_copy).isShown());
+                hideKeyboard(activity);
+            });
+            capture("02-login-code");
+            scenario.onActivity(activity -> {
+                ClipboardManager clipboard = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+                activity.findViewById(R.id.login_code).performClick();
+                assertEquals("AB12CD34", clipboard.getPrimaryClip().getItemAt(0).getText().toString());
+
+                clipboard.setPrimaryClip(ClipData.newPlainText("test", "reset"));
+                activity.findViewById(R.id.login_copy).performClick();
+                assertEquals("AB12CD34", clipboard.getPrimaryClip().getItemAt(0).getText().toString());
+            });
+        }
+    }
+
+    @Test public void cachedLibrarySupportsSearchFilterSortAndPersistentSelection() throws Exception {
+        seedLibrary();
+        try (ActivityScenario<LibraryActivity> scenario = ActivityScenario.launch(LibraryActivity.class)) {
+            await(scenario, activity -> rows(activity).size() == 6, "Six cached tracks should be visible");
+            scenario.onActivity(activity -> {
+                assertEquals("1004", rows(activity).get(0));
+                hideKeyboard(activity);
+            });
+            capture("03-library");
+
+            scenario.onActivity(activity -> ((Spinner) activity.findViewById(R.id.library_sort)).setSelection(2));
+            await(scenario, activity -> !rows(activity).isEmpty() && "1001".equals(rows(activity).get(0)),
+                    "Sorting by title should put Вечерний свет first");
+            await(scenario, activity -> ((ListView) activity.findViewById(R.id.library_list)).getChildCount() > 0,
+                    "Track rows should be laid out");
+            scenario.onActivity(activity -> {
+                ListView list = activity.findViewById(R.id.library_list);
+                CheckBox check = findCheckBox(list.getChildAt(0));
+                assertNotNull("Each unsaved track has a selection checkbox", check);
+                assertFalse(check.isChecked());
+                check.performClick();
+                assertTrue(check.isChecked());
+                assertTrue(activity.findViewById(R.id.library_download_selected).isEnabled());
+            });
+            capture("04-library-selected");
+
+            scenario.onActivity(activity -> ((Spinner) activity.findViewById(R.id.library_filter)).setSelection(1));
+            await(scenario, activity -> new HashSet<>(rows(activity)).equals(new HashSet<>(Arrays.asList("1002", "1005"))),
+                    "Downloaded filter should show only the two downloaded tracks");
+            scenario.onActivity(activity -> assertTrue("Selection should survive when filtered out",
+                    activity.findViewById(R.id.library_download_selected).isEnabled()));
+            capture("05-library-downloaded");
+
+            scenario.onActivity(activity -> ((Spinner) activity.findViewById(R.id.library_filter)).setSelection(0));
+            await(scenario, activity -> rows(activity).size() == 6, "Removing filter should restore all rows");
+            await(scenario, activity -> {
+                ListView list = activity.findViewById(R.id.library_list);
+                CheckBox check = list.getChildCount() == 0 ? null : findCheckBox(list.getChildAt(0));
+                return check != null && check.isChecked();
+            }, "Previously selected track must remain checked");
+
+            scenario.onActivity(activity -> ((EditText) activity.findViewById(R.id.library_search)).setText("лунный"));
+            await(scenario, activity -> new HashSet<>(rows(activity)).equals(new HashSet<>(Arrays.asList("1001", "1004"))),
+                    "Artist search should be case-insensitive");
+            scenario.onActivity(InterfaceSmokeTest::hideKeyboard);
+            capture("06-library-search");
+
+            scenario.onActivity(activity -> activity.findViewById(R.id.library_clear_selection).performClick());
+            scenario.onActivity(activity -> assertFalse(activity.findViewById(R.id.library_download_selected).isEnabled()));
+            scenario.onActivity(activity -> activity.findViewById(R.id.library_select_all).performClick());
+            scenario.onActivity(activity -> {
+                Button download = activity.findViewById(R.id.library_download_selected);
+                assertTrue(download.isEnabled());
+                assertEquals("Скачать выбранные · 2", download.getText().toString());
+            });
+            // Do not click download or refresh: this fixture has no real credentials.
+        }
+    }
+
+    private void seedLibrary() {
+        Store store = new Store(context);
+        store.saveTokens("synthetic-instrumentation-token-not-valid", "");
+        store.likedCount(6);
+        store.setIds("downloaded", new HashSet<>(Arrays.asList("1002", "1005")));
+        new LibraryRepository(context).remember(Arrays.asList(
+                new YandexApi.Track("1004", "Ночные огни", "Лунный берег", "Город"),
+                new YandexApi.Track("1002", "Тихий океан", "Море внутри", "Волны"),
+                new YandexApi.Track("1006", "Сквозь облака", "Полюса", "Небо"),
+                new YandexApi.Track("1001", "Вечерний свет", "Лунный берег", "Город"),
+                new YandexApi.Track("1005", "Тёплый дождь", "Марина", "Лето"),
+                new YandexApi.Track("1003", "На заре", "Север", "Дом")));
+    }
+
+    private static List<String> rows(Activity activity) {
+        ListView list = activity.findViewById(R.id.library_list);
+        List<String> ids = new ArrayList<>();
+        ListAdapter adapter = list.getAdapter();
+        if (adapter != null) {
+            for (int i = 0; i < adapter.getCount(); i++) ids.add(((LibraryTrack) adapter.getItem(i)).id);
+        }
+        return ids;
+    }
+
+    private static CheckBox findCheckBox(View view) {
+        if (view instanceof CheckBox) return (CheckBox) view;
+        if (view instanceof ViewGroup) {
+            ViewGroup parent = (ViewGroup) view;
+            for (int i = 0; i < parent.getChildCount(); i++) {
+                CheckBox result = findCheckBox(parent.getChildAt(i));
+                if (result != null) return result;
+            }
+        }
+        return null;
+    }
+
+    private <A extends Activity> void await(ActivityScenario<A> scenario, Predicate<A> condition,
+            String message) {
+        long deadline = SystemClock.elapsedRealtime() + 5000;
+        do {
+            AtomicBoolean ready = new AtomicBoolean();
+            scenario.onActivity(activity -> ready.set(condition.test(activity)));
+            if (ready.get()) return;
+            SystemClock.sleep(50);
+        } while (SystemClock.elapsedRealtime() < deadline);
+        fail(message);
+    }
+
+    private static void hideKeyboard(Activity activity) {
+        InputMethodManager manager = (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+        manager.hideSoftInputFromWindow(activity.getWindow().getDecorView().getWindowToken(), 0);
+        View focus = activity.getCurrentFocus();
+        if (focus != null) focus.clearFocus();
+    }
+
+    private void capture(String name) throws Exception {
+        instrumentation.waitForIdleSync();
+        instrumentation.getUiAutomation().waitForIdle(150, 5000);
+        Bitmap screenshot = instrumentation.getUiAutomation().takeScreenshot();
+        assertNotNull("Android should provide a screenshot", screenshot);
+        File directory = new File(context.getExternalFilesDir(null), "ui-previews");
+        assertTrue(directory.isDirectory() || directory.mkdirs());
+        try (FileOutputStream output = new FileOutputStream(new File(directory, name + ".png"))) {
+            assertTrue(screenshot.compress(Bitmap.CompressFormat.PNG, 100, output));
+        } finally { screenshot.recycle(); }
+    }
+}
