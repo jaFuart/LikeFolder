@@ -83,7 +83,7 @@ final class SyncEngine {
                         lastError = ex.getMessage();
                         // Prevent a failing API / expired entitlement from causing hundreds of network calls.
                         if (ok == 0 && errors >= 5) {
-                            String status = "MP3 недоступны, первые 5 загрузок завершились ошибкой: " + lastError;
+                            String status = "Выгрузка остановлена: первые 5 загрузок завершились ошибкой. " + lastError;
                             store.status(status);
                             return status;
                         }

@@ -7,8 +7,8 @@ android {
         applicationId = "com.likefolder.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.1.2"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -18,4 +18,5 @@ android {
 
 dependencies {
     implementation("androidx.work:work-runtime:2.10.0")
+    testImplementation("junit:junit:4.13.2")
 }

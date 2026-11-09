@@ -15,6 +15,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -27,9 +28,13 @@ import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 import org.json.JSONObject;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /** Lightweight native Android UI, no overlays or hooks into the official Yandex app. */
 public final class MainActivity extends Activity {
@@ -42,12 +47,14 @@ public final class MainActivity extends Activity {
     private Store store;
     private LinearLayout loginCard, controls;
     private TextView statusText, countText, folderLabel, codeLabel, codeHint;
-    private Button codeButton, copyButton;
+    private Button loginButton, codeButton, copyButton;
     private EditText folderEdit;
     private Switch quickSwitch;
     private CheckBox wifiOnly;
     private boolean changingSwitch = false;
-    private volatile boolean authorizing = false;
+    private boolean authorizing = false;
+    private int loginAttempt = 0;
+    private Future<?> loginTask;
     private volatile String verificationUrl = "", userCode = "";
     private final Runnable ticker = new Runnable() {
         @Override public void run() { refresh(); handler.postDelayed(this, 2000); }
@@ -67,7 +74,9 @@ public final class MainActivity extends Activity {
         super.onResume(); handler.removeCallbacks(ticker); ticker.run();
     }
     @Override protected void onPause() { handler.removeCallbacks(ticker); super.onPause(); }
-    @Override protected void onDestroy() { executor.shutdownNow(); super.onDestroy(); }
+    @Override protected void onDestroy() {
+        cancelLogin(); executor.shutdownNow(); super.onDestroy();
+    }
 
     private void buildUI() {
         ScrollView scroll = new ScrollView(this);
@@ -98,9 +107,9 @@ public final class MainActivity extends Activity {
         loginCard.addView(loginTitle);
         TextView loginDesc = text("Вход по коду на странице Яндекса. Пароль не вводится в LikeFolder.", 14, MUTED, false);
         marginTop(loginDesc, 8); loginCard.addView(loginDesc);
-        Button loginBtn = button("Получить код входа", true);
-        marginTop(loginBtn, 16); loginCard.addView(loginBtn);
-        loginBtn.setOnClickListener(v -> startLogin(loginBtn));
+        loginButton = button("Получить код входа", true);
+        marginTop(loginButton, 16); loginCard.addView(loginButton);
+        loginButton.setOnClickListener(v -> startLogin());
         codeLabel = text("", 26, ACCENT, true);
         codeLabel.setTextIsSelectable(true);
         marginTop(codeLabel, 14);
@@ -201,51 +210,81 @@ public final class MainActivity extends Activity {
                 .setPositiveButton("Отключить", (d, w) -> logout()).show());
         marginTop(account, 14); controls.addView(account);
     }
-    private void startLogin(Button loginButton) {
+    private void startLogin() {
         if (authorizing) return;
+        final int attempt = ++loginAttempt;
+        clearLoginCode();
         authorizing = true; loginButton.setEnabled(false);
         codeHint.setText("Получаю код авторизации…");
-        executor.execute(() -> {
+        loginTask = executor.submit(() -> {
             try {
                 JSONObject code = YandexApi.requestCode(UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+                if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
                 String device = code.getString("device_code");
                 String user = code.getString("user_code");
-                String link = code.optString("verification_url", "https://ya.ru/device");
-                int waitSeconds = Math.max(5, code.optInt("interval", 5));
-                long until = System.currentTimeMillis() + 1000L * code.optInt("expires_in", 300);
-                verificationUrl = link; userCode = user;
-                runOnUiThread(() -> {
+                String link = code.optString("verification_url", "https://oauth.yandex.ru/device");
+                long interval = 1000L * Math.max(5, code.optInt("interval", 5));
+                long until = SystemClock.elapsedRealtime() + 1000L * Math.max(0, code.optInt("expires_in", 300));
+                postLoginUpdate(attempt, () -> {
+                    verificationUrl = link; userCode = user;
                     codeLabel.setText(user);
                     codeHint.setText("Открой сайт, введи код и разреши доступ. Здесь вход продолжится автоматически.");
                     codeButton.setVisibility(View.VISIBLE);
                     copyButton.setVisibility(View.VISIBLE);
                 });
-                while (!Thread.currentThread().isInterrupted() && System.currentTimeMillis() < until) {
-                    Thread.sleep(waitSeconds * 1000L);
+                JSONObject result = DeviceCodePoller.await(() -> YandexApi.pollCode(device),
+                        interval, until, SystemClock::elapsedRealtime, Thread::sleep,
+                        retrying -> postLoginUpdate(attempt, () -> codeHint.setText(retrying
+                                ? "Связь с Яндексом прервалась. Повторяю проверку автоматически — новый код пока не нужен. Если ожидание затянется, переключи Wi-Fi или мобильный интернет."
+                                : "Ожидаю подтверждения на странице Яндекса. Вход продолжится автоматически.")));
+                String access = result.getString("access_token");
+                String refreshToken = result.optString("refresh_token", "");
+                postLoginUpdate(attempt, () -> {
                     try {
-                        JSONObject result = YandexApi.pollCode(device);
-                        String access = result.getString("access_token");
-                        store.saveTokens(access, result.optString("refresh_token", ""));
+                        store.saveTokens(access, refreshToken);
                         store.status("Аккаунт подключён. Получаю исходный список лайков…");
-                        runOnUiThread(() -> {
-                            loginButton.setEnabled(true); codeHint.setText("Вход выполнен");
-                            SyncWorker.schedule(this);
-                            startServiceAction(SyncService.ACTION_ONCE);
-                            refresh();
-                        });
-                        return;
-                    } catch (Net.ApiError ex) {
-                        String message = ex.getMessage();
-                        if (message.contains("authorization_pending")) continue;
-                        if (message.contains("slow_down")) { waitSeconds += 5; continue; }
-                        throw ex;
+                        finishLogin("Вход выполнен");
+                        SyncWorker.schedule(this);
+                        startServiceAction(SyncService.ACTION_ONCE);
+                        refresh();
+                    } catch (Exception ex) {
+                        finishLogin(loginError(ex));
                     }
-                }
-                throw new IllegalStateException("Время действия кода истекло. Получи новый код.");
+                });
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                postLoginUpdate(attempt, () -> finishLogin("Вход отменён. Получи новый код, чтобы повторить."));
             } catch (Exception ex) {
-                runOnUiThread(() -> { codeHint.setText("Не удалось подключиться: " + ex.getMessage()); loginButton.setEnabled(true); });
-            } finally { authorizing = false; }
+                postLoginUpdate(attempt, () -> finishLogin(loginError(ex)));
+            }
         });
+    }
+    private void postLoginUpdate(int attempt, Runnable update) {
+        runOnUiThread(() -> {
+            if (attempt == loginAttempt && !isDestroyed() && !isFinishing()) update.run();
+        });
+    }
+    private void clearLoginCode() {
+        verificationUrl = ""; userCode = "";
+        codeLabel.setText("");
+        codeButton.setVisibility(View.GONE); copyButton.setVisibility(View.GONE);
+    }
+    private void finishLogin(String message) {
+        authorizing = false; loginTask = null;
+        loginButton.setEnabled(true);
+        clearLoginCode(); codeHint.setText(message);
+    }
+    private void cancelLogin() {
+        ++loginAttempt;
+        if (loginTask != null) loginTask.cancel(true);
+        finishLogin("");
+    }
+    private static String loginError(Exception ex) {
+        if (ex instanceof UnknownHostException)
+            return "Не удалось найти сервер Яндекса. Проверь подключение, VPN и частный DNS или переключи сеть, затем получи новый код.";
+        if (ex instanceof SocketTimeoutException || ex instanceof SocketException)
+            return "Не удалось связаться с Яндексом. Проверь интернет и получи новый код.";
+        return "Не удалось подключиться: " + ex.getMessage();
     }
     private void showTokenDialog() {
         EditText input = new EditText(this);
@@ -259,6 +298,7 @@ public final class MainActivity extends Activity {
                 .setPositiveButton("Подключить", (dialog, which) -> {
                     String token = input.getText().toString().trim();
                     if (token.length() < 20) { store.status("Токен выглядит слишком коротким"); return; }
+                    cancelLogin();
                     store.saveTokens(token, "");
                     store.status("Проверяю введённый токен…");
                     SyncWorker.schedule(this);
@@ -267,12 +307,10 @@ public final class MainActivity extends Activity {
                 }).show();
     }
     private void logout() {
+        cancelLogin();
         startService(new Intent(this, SyncService.class).setAction(SyncService.ACTION_STOP));
         SyncWorker.cancel(this);
         store.signOut();
-        verificationUrl = ""; userCode = "";
-        codeLabel.setText(""); codeHint.setText("");
-        codeButton.setVisibility(View.GONE); copyButton.setVisibility(View.GONE);
         refresh();
     }
     private void startServiceAction(String action) {

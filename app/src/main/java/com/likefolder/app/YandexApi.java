@@ -116,15 +116,23 @@ final class YandexApi {
             String xml;
             try { xml = Net.readText(conn.getInputStream()); }
             finally { conn.disconnect(); }
-            String host = xmlTag(xml, "host");
-            String path = xmlTag(xml, "path");
-            String ts = xmlTag(xml, "ts");
-            String s = xmlTag(xml, "s");
-            if (!host.matches("[A-Za-z0-9.-]+") || !path.startsWith("/") || !ts.matches("[0-9]+"))
-                throw new IOException("Неподдерживаемый ответ CDN");
-            String md5 = md5(CDN_SALT + path.substring(1) + s);
-            return "https://" + host + "/get-mp3/" + md5 + "/" + ts + path;
+            return mp3UrlFromXml(xml);
         } catch (org.json.JSONException ex) { throw new IOException("Не удалось получить ссылку на MP3", ex); }
+    }
+    static String mp3UrlFromXml(String xml) throws IOException {
+        String host = xmlTag(xml, "host");
+        String path = xmlTag(xml, "path");
+        String ts = xmlTag(xml, "ts");
+        String s = xmlTag(xml, "s");
+        if (!host.matches("[A-Za-z0-9.-]+"))
+            throw new IOException("Неподдерживаемый ответ CDN: неверное поле host");
+        if (!path.startsWith("/"))
+            throw new IOException("Неподдерживаемый ответ CDN: неверное поле path");
+        // CDN timestamps contain hexadecimal digits. Preserve the original URL token verbatim.
+        if (!ts.matches("[0-9A-Fa-f]+"))
+            throw new IOException("Неподдерживаемый ответ CDN: неверное поле ts");
+        String sign = md5(CDN_SALT + path.substring(1) + s);
+        return "https://" + host + "/get-mp3/" + sign + "/" + ts + path;
     }
     private static String xmlTag(String xml, String tag) throws IOException {
         Matcher m = Pattern.compile("<" + tag + ">([^<]{1,2000})</" + tag + ">").matcher(xml);
