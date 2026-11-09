@@ -58,6 +58,9 @@ public final class InterfaceSmokeTest {
     @Before public void prepareLocalState() throws Exception {
         instrumentation = InstrumentationRegistry.getInstrumentation();
         context = instrumentation.getTargetContext();
+        // Also wake here when instrumentation is launched without run-smoke.sh.
+        shellOutput("input keyevent KEYCODE_WAKEUP");
+        shellOutput("wm dismiss-keyguard");
         WorkManager.getInstance(context).cancelAllWork().getResult().get(5, TimeUnit.SECONDS);
         new Store(context).signOut();
         new LibraryRepository(context).clear();
@@ -243,23 +246,34 @@ public final class InterfaceSmokeTest {
     }
 
     private <A extends Activity> void capture(ActivityScenario<A> scenario, String name) throws Exception {
-        await(scenario, activity -> {
-            View decor = activity.getWindow().getDecorView();
-            return decor.hasWindowFocus() && decor.isShown() && decor.getWidth() > 0 && decor.getHeight() > 0;
-        }, "The screenshot window must be visible and focused");
-        instrumentation.waitForIdleSync();
-        CountDownLatch frameCommitted = new CountDownLatch(1);
-        scenario.onActivity(activity -> {
-            View decor = activity.getWindow().getDecorView();
-            assertTrue("Screenshot checks require hardware rendering", decor.isHardwareAccelerated());
-            decor.getViewTreeObserver().registerFrameCommitCallback(frameCommitted::countDown);
-            decor.invalidate();
-        });
-        assertTrue("The updated UI must submit a rendered frame before capture",
-                frameCommitted.await(10, TimeUnit.SECONDS));
-        // Frame commit precedes display presentation. Allow compositor and window transitions to settle.
-        SystemClock.sleep(1000);
-        instrumentation.getUiAutomation().waitForIdle(300, 5000);
+        try {
+            await(scenario, activity -> {
+                View decor = activity.getWindow().getDecorView();
+                return decor.hasWindowFocus() && decor.isShown() && decor.getWidth() > 0 && decor.getHeight() > 0;
+            }, "The screenshot window must be visible and focused");
+            instrumentation.waitForIdleSync();
+            CountDownLatch frameCommitted = new CountDownLatch(1);
+            scenario.onActivity(activity -> {
+                View decor = activity.getWindow().getDecorView();
+                assertTrue("Screenshot checks require hardware rendering", decor.isHardwareAccelerated());
+                decor.getViewTreeObserver().registerFrameCommitCallback(frameCommitted::countDown);
+                decor.invalidate();
+            });
+            assertTrue("The updated UI must submit a rendered frame before capture",
+                    frameCommitted.await(10, TimeUnit.SECONDS));
+            // Frame commit precedes display presentation. Allow compositor and window transitions to settle.
+            SystemClock.sleep(1000);
+            instrumentation.getUiAutomation().waitForIdle(300, 5000);
+        } catch (Exception | AssertionError failure) {
+            // Capture the actual blocking window before ActivityScenario closes it.
+            try { saveScreenshot("failed-" + name); }
+            catch (Exception | AssertionError diagnosticFailure) { failure.addSuppressed(diagnosticFailure); }
+            throw failure;
+        }
+        saveScreenshot(name);
+    }
+
+    private void saveScreenshot(String name) throws Exception {
         Bitmap screenshot = instrumentation.getUiAutomation().takeScreenshot();
         assertNotNull("Android should provide a screenshot", screenshot);
         File directory = new File(context.getExternalFilesDir(null), "ui-previews");
