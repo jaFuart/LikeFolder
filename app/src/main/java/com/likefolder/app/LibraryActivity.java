@@ -159,6 +159,7 @@ public final class LibraryActivity extends Activity {
         loadStatus.setVisibility(View.GONE); tools.addView(loadStatus);
         loading = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         loading.setIndeterminate(true); loading.setIndeterminateTintList(ColorStateList.valueOf(AppUi.ACCENT));
+        loading.setProgressTintList(ColorStateList.valueOf(AppUi.ACCENT));
         loading.setVisibility(View.GONE); tools.addView(loading, new LinearLayout.LayoutParams(-1, dp(3)));
 
         LinearLayout selectionTools = new LinearLayout(this); selectionTools.setGravity(Gravity.CENTER_VERTICAL);
@@ -225,13 +226,25 @@ public final class LibraryActivity extends Activity {
     private void loadLibrary(boolean fetchFromYandex) {
         if (loadingLibrary) return;
         loadingLibrary = true; final int generation = ++loadGeneration;
+        loading.setIndeterminate(true);
         refreshButton.setEnabled(false); refreshButton.setAlpha(.4f); loading.setVisibility(View.VISIBLE);
-        loadStatus.setText(fetchFromYandex ? "Обновляю названия и даты лайков…" : "Читаю сохранённую медиатеку…");
+        loadStatus.setText(fetchFromYandex ? "Обновляю список треков…" : "Читаю сохранённую медиатеку…");
         loadStatus.setVisibility(View.VISIBLE);
+        applyQuery();
         loadTask = executor.submit(() -> {
-            try {
-                if (fetchFromYandex) repository.refresh((loaded, total) -> postLoad(generation, () ->
-                        loadStatus.setText("Загружаю медиатеку: " + loaded + " / " + total)));
+            try (ApiRequestQueue.ListenerScope ignored = ApiRequestQueue.withListener((delayMillis, attempt) ->
+                    postLoad(generation, () -> loadStatus.setText("Яндекс просит паузу. Продолжу автоматически через "
+                            + Math.max(1, (delayMillis + 999) / 1000) + " с…")))) {
+                if (fetchFromYandex) repository.refresh((loaded, total) -> {
+                    // The repository checkpoints each successful batch before reporting progress.
+                    List<LibraryTrack> partial = repository.load();
+                    postLoad(generation, () -> {
+                        tracks = partial; downloaded = store.ids("downloaded"); selected.removeAll(downloaded);
+                        loading.setIndeterminate(false); loading.setMax(Math.max(1, total)); loading.setProgress(loaded);
+                        loadStatus.setText("Загружаю медиатеку: " + loaded + " / " + total);
+                        applyQuery();
+                    });
+                });
                 List<LibraryTrack> result = repository.load();
                 boolean needsRefresh = !fetchFromYandex && System.currentTimeMillis() - repository.lastRefreshAt() > 15 * 60 * 1000L;
                 postLoad(generation, () -> {
@@ -241,8 +254,16 @@ public final class LibraryActivity extends Activity {
                     if (needsRefresh) loadLibrary(true);
                 });
             } catch (Exception ex) {
+                // Even an exhausted server limit must not hide the batches that already arrived.
+                List<LibraryTrack> cached = null;
+                try { cached = repository.load(); } catch (RuntimeException ignored) { }
+                final List<LibraryTrack> recovered = cached;
                 postLoad(generation, () -> {
-                    finishLoad(); loadStatus.setText("Не удалось обновить медиатеку. " + ex.getMessage());
+                    if (recovered != null) {
+                        tracks = recovered; downloaded = store.ids("downloaded"); selected.removeAll(downloaded);
+                    }
+                    finishLoad(); loadStatus.setText((tracks.isEmpty() ? "Не удалось загрузить медиатеку. "
+                            : "Список загружен не полностью. Уже полученные треки сохранены. ") + ex.getMessage());
                     loadStatus.setVisibility(View.VISIBLE); applyQuery();
                 });
             }
