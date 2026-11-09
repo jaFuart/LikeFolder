@@ -108,8 +108,8 @@ public final class NetRequestQueueTest {
         ApiRequestQueue queue = new ApiRequestQueue(now::get, now::addAndGet);
         AtomicInteger active = new AtomicInteger(), maximum = new AtomicInteger(), opens = new AtomicInteger();
         CountDownLatch firstEntered = new CountDownLatch(1), releaseFirst = new CountDownLatch(1);
-        CountDownLatch jobStarted = new CountDownLatch(1);
-        AtomicReference<Thread> jobThread = new AtomicReference<>();
+        CountDownLatch jobStarted = new CountDownLatch(1), nextStarted = new CountDownLatch(1);
+        AtomicReference<Thread> jobThread = new AtomicReference<>(), nextThread = new AtomicReference<>();
         DownloadCoordinator.Job job = DownloadCoordinator.tryStart();
         assertNotNull("Tests must not overlap real download jobs", job);
         ExecutorService executor = Executors.newFixedThreadPool(3);
@@ -141,11 +141,17 @@ public final class NetRequestQueueTest {
             awaitWaiting(jobThread.get());
             FakeConnection second = new FakeConnection(MUSIC, 200, "{\"result\":2}", null);
             second.active = active; second.maximum = maximum;
-            Future<JSONObject> next = executor.submit(() -> Net.json(MUSIC, "GET", null, null, queue, url -> {
-                opens.incrementAndGet();
-                assertEquals("The earlier request must disconnect before the next opens", 1, first.disconnects.get());
-                return second;
-            }));
+            Future<JSONObject> next = executor.submit(() -> {
+                nextThread.set(Thread.currentThread());
+                nextStarted.countDown();
+                return Net.json(MUSIC, "GET", null, null, queue, url -> {
+                    opens.incrementAndGet();
+                    assertEquals("The earlier request must disconnect before the next opens", 1, first.disconnects.get());
+                    return second;
+                });
+            });
+            assertTrue(nextStarted.await(5, TimeUnit.SECONDS));
+            awaitWaiting(nextThread.get());
             job.cancel();
             assertTrue(cancelled.get(3, TimeUnit.SECONDS) instanceof InterruptedIOException);
             assertFalse(DownloadCoordinator.snapshot().running);
