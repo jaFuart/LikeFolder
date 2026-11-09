@@ -1,0 +1,16 @@
+<resources>
+    <item name="login_code" type="id" />
+    <item name="login_copy" type="id" />
+    <item name="login_retry" type="id" />
+    <item name="open_authorization" type="id" />
+    <item name="manual_token" type="id" />
+    <item name="library_search" type="id" />
+    <item name="library_filter" type="id" />
+    <item name="library_sort" type="id" />
+    <item name="library_list" type="id" />
+    <item name="library_select_all" type="id" />
+    <item name="library_clear_selection" type="id" />
+    <item name="library_download_selected" type="id" />
+    <item name="library_refresh" type="id" />
+    <item name="download_stop" type="id" />
+</resources>

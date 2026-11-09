@@ -17,19 +17,67 @@ import javax.crypto.spec.GCMParameterSpec;
 /** Private settings and Android Keystore-protected OAuth credentials. */
 final class Store {
     private static final String KEY_ALIAS = "likefolder.oauth.v1";
+    private static final Object AUTH_LOCK = new Object();
+    private static long authGeneration;
+    private final Context context;
     final SharedPreferences prefs;
-    Store(Context ctx) { prefs = ctx.getApplicationContext().getSharedPreferences("likefolder", Context.MODE_PRIVATE); }
+    Store(Context ctx) {
+        context = ctx.getApplicationContext();
+        prefs = context.getSharedPreferences("likefolder", Context.MODE_PRIVATE);
+    }
 
-    synchronized String getAccess() { return decrypt(prefs.getString("access", "")); }
-    synchronized String getRefresh() { return decrypt(prefs.getString("refresh", "")); }
-    synchronized void saveTokens(String access, String refresh) {
+    static final class AuthSnapshot {
+        final String access;
+        final long generation;
+        AuthSnapshot(String access, long generation) { this.access = access; this.generation = generation; }
+    }
+
+    AuthSnapshot authSnapshot() {
+        synchronized (AUTH_LOCK) { return new AuthSnapshot(decrypt(prefs.getString("access", "")), authGeneration); }
+    }
+
+    String getAccess() {
+        synchronized (AUTH_LOCK) { return decrypt(prefs.getString("access", "")); }
+    }
+    String getRefresh() {
+        synchronized (AUTH_LOCK) { return decrypt(prefs.getString("refresh", "")); }
+    }
+    String getRefreshForAccess(AuthSnapshot expected) {
+        synchronized (AUTH_LOCK) {
+            return expected != null && expected.generation == authGeneration && !expected.access.isEmpty()
+                    && expected.access.equals(decrypt(prefs.getString("access", "")))
+                    ? decrypt(prefs.getString("refresh", "")) : "";
+        }
+    }
+    void saveTokens(String access, String refresh) {
+        synchronized (AUTH_LOCK) { writeTokens(access, refresh); ++authGeneration; }
+    }
+    boolean saveRefreshedTokens(AuthSnapshot expected, String access, String refresh) {
+        synchronized (AUTH_LOCK) {
+            if (expected == null || expected.generation != authGeneration || expected.access.isEmpty()
+                    || !expected.access.equals(decrypt(prefs.getString("access", "")))) return false;
+            writeTokens(access, refresh);
+            return true;
+        }
+    }
+    private void writeTokens(String access, String refresh) {
         SharedPreferences.Editor e = prefs.edit().putString("access", encrypt(access));
         if (refresh != null && !refresh.trim().isEmpty()) e.putString("refresh", encrypt(refresh));
+        else e.remove("refresh"); // A manual token must not retain another account's refresh token.
         e.apply();
     }
-    synchronized boolean isLoggedIn() { return !getAccess().trim().isEmpty(); }
-    synchronized void signOut() {
-        prefs.edit().clear().apply();
+    boolean isLoggedIn() { return !getAccess().trim().isEmpty(); }
+    void signOut() {
+        synchronized (AUTH_LOCK) {
+            new LibraryRepository(context).clear();
+            prefs.edit().clear().apply();
+            ++authGeneration;
+        }
+    }
+    synchronized void markDownloaded(String id) {
+        Set<String> downloaded = ids("downloaded"), seen = ids("seen");
+        downloaded.add(id); seen.add(id);
+        prefs.edit().putStringSet("downloaded", downloaded).putStringSet("seen", seen).apply();
     }
     synchronized Set<String> ids(String key) { return new HashSet<>(prefs.getStringSet(key, new HashSet<>())); }
     synchronized void addId(String key, String value) {
